@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.AI;
 using sharpclaw.Agents;
+using sharpclaw.Core;
 using sharpclaw.UI;
 
 namespace sharpclaw.Chat;
@@ -29,6 +30,7 @@ public class MemoryPipelineChatReducer : IChatReducer
     private readonly string? _systemPrompt;
     private readonly ConversationArchiver? _archiver;
     private readonly MemorySaver? _memorySaver;
+    private readonly IAgentContext _agentContext;
 
     private readonly Dictionary<string, ChatMessage> _archivedMessages = new();
 
@@ -36,9 +38,6 @@ public class MemoryPipelineChatReducer : IChatReducer
 
     /// <summary>由 MainAgent 每轮设置，用户本轮发起对话的原始输入。</summary>
     public string? UserInput { get; set; }
-
-    /// <summary>工作记忆文件路径，由 MainAgent 设置。</summary>
-    public string? WorkingMemoryPath { get; set; }
 
     /// <summary>
     /// 上一次的工作记忆内容快照（对话结束时保存），供 MainAgent 在新会话开始时注入。
@@ -50,11 +49,13 @@ public class MemoryPipelineChatReducer : IChatReducer
 
     /// <param name="resetThreshold">消息数超过此阈值时触发清空和归档</param>
     public MemoryPipelineChatReducer(
+        IAgentContext agentContext,
         int resetThreshold,
         string? systemPrompt = null,
         ConversationArchiver? archiver = null,
         MemorySaver? memorySaver = null)
     {
+        _agentContext = agentContext;
         _resetThreshold = resetThreshold;
         _systemPrompt = systemPrompt;
         _archiver = archiver;
@@ -160,11 +161,7 @@ public class MemoryPipelineChatReducer : IChatReducer
         // ── 5. 注入工作记忆（上次会话的对话快照）──
         if (!string.IsNullOrWhiteSpace(OldWorkingMemoryContent))
         {
-            systemMessages.Add(new ChatMessage(ChatRole.System,
-                $"[工作记忆] 以下是上次会话的对话记录，供你参考延续上下文：\n\n{OldWorkingMemoryContent}")
-            {
-                AdditionalProperties = new() { [AutoWorkingMemoryKey] = true }
-            });
+            InjectFakeCommandCat(systemMessages, _agentContext.GetSessionWorkingMemoryFilePath(), OldWorkingMemoryContent, AutoWorkingMemoryKey);
             AppLogger.Log($"[Reducer] 已注入工作记忆（{OldWorkingMemoryContent.Length}字）");
         }
 
@@ -187,15 +184,7 @@ public class MemoryPipelineChatReducer : IChatReducer
     {
         try
         {
-            var dir = Path.GetDirectoryName(WorkingMemoryPath);
-            if (dir == null)
-            {
-                AppLogger.Log($"[Archive] 无法获取工作记忆目录，历史文件保存失败");
-                return;
-            }
-            if (!Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-            var historyDir = Path.Combine(dir, "history");
+            var historyDir = _agentContext.GetSessionHistoryDirPath();
             if (!Directory.Exists(historyDir))
                 Directory.CreateDirectory(historyDir);
 
@@ -251,23 +240,74 @@ public class MemoryPipelineChatReducer : IChatReducer
 
     private void SaveWorkingMemory()
     {
-        if (WorkingMemoryPath is null)
-            return;
-
         try
         {
-            var dir = Path.GetDirectoryName(WorkingMemoryPath);
-            if (dir is not null && !Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-
             var content = WorkingMemoryBuffer.ToString();
-            File.WriteAllText(WorkingMemoryPath, content);
+            File.WriteAllText(_agentContext.GetSessionWorkingMemoryFilePath(), content);
             AppLogger.Log($"[Reducer] 已保存工作记忆（{content.Length}字）");
         }
         catch (Exception ex)
         {
             AppLogger.Log($"[Reducer] 工作记忆保存失败: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 向对话列表中注入一条假的 CommandCat 工具调用和结果
+    /// </summary>
+    /// <param name="messages">当前对话的消息列表</param>
+    /// <param name="filePath">假装读取的文件路径</param>
+    /// <param name="fileContent">你已经提前在后台读取好的文件内容（建议自带行号，与真实工具保持一致）</param>
+    /// <param name="startLine">起始行号</param>
+    /// <param name="endLine">结束行号</param>
+    public static void InjectFakeCommandCat(
+        List<ChatMessage> messages,
+        string filePath,
+        string fileContent,
+        string messageKey,
+        int startLine = 1,
+        int endLine = -1)
+    {
+        // 1. 生成一个唯一的 CallId，LLM 依赖这个 ID 将结果与调用匹配起来
+        var callId = Guid.NewGuid().ToString().Replace("-", "").Substring(0, 10); // 截取一段即可，如 "a1b2c3d4e5"
+
+        // 2. 构造【Assistant】发起工具调用的假消息
+        var assistantMessage = new ChatMessage();
+        assistantMessage.Contents.Add(new FunctionCallContent(
+            callId: callId,
+            name: "CommandCat",
+            arguments: new Dictionary<string, object?>
+            {
+                { "filePath", filePath },
+                { "startLine", startLine },
+                { "endLine", endLine }
+            }
+        ));
+
+        // 标记为自动注入，方便后续 Reducer 清理（复用你现有的 Key）
+        assistantMessage.AdditionalProperties = new()
+        {
+            { messageKey, true }
+        };
+
+        // 3. 构造【Tool】返回执行结果的假消息
+        var toolMessage = new ChatMessage();
+        toolMessage.Contents.Add(new FunctionResultContent(
+            callId: callId,
+            result: $"--- File: {Path.GetFileName(filePath)} (Reading from line {startLine}) ---\n" +
+                    $"{fileContent}\n" +
+                    $"--- End of Read ---"
+        ));
+
+        // 同样标记为自动注入
+        toolMessage.AdditionalProperties = new()
+        {
+            { messageKey, true }
+        };
+
+        // 4. 必须按顺序添加到对话列表中：先 Call，再 Result
+        messages.Add(assistantMessage);
+        messages.Add(toolMessage);
     }
 
     private void InjectMemories(
@@ -304,21 +344,13 @@ public class MemoryPipelineChatReducer : IChatReducer
 
         if (!string.IsNullOrWhiteSpace(primaryMemory))
         {
-            systemMessages.Add(new ChatMessage(ChatRole.System,
-                $"[核心记忆] 以下是持久化的长期重要信息：\n\n{primaryMemory}")
-            {
-                AdditionalProperties = new() { [AutoPrimaryMemoryKey] = true }
-            });
+            InjectFakeCommandCat(systemMessages, _agentContext.GetSessionPrimaryMemoryFilePath(), primaryMemory, AutoPrimaryMemoryKey);
             AppLogger.Log($"[Reducer] 已注入核心记忆（{primaryMemory.Length}字）");
         }
 
         if (!string.IsNullOrWhiteSpace(recentMemory))
         {
-            systemMessages.Add(new ChatMessage(ChatRole.System,
-                $"[近期记忆] 以下是最近对话的详细摘要：\n\n{recentMemory}")
-            {
-                AdditionalProperties = new() { [AutoRecentMemoryKey] = true }
-            });
+            InjectFakeCommandCat(systemMessages, _agentContext.GetSessionRecentMemoryFilePath(), recentMemory, AutoRecentMemoryKey);
             AppLogger.Log($"[Reducer] 已注入近期记忆（{recentMemory.Length}字）");
         }
     }

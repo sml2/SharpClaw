@@ -26,7 +26,7 @@ public abstract class CommandBase
         _agentContext = agentContext;
     }
 
-    protected string GetDefaultWorkspace() => _agentContext.GetWorkspacePath();
+    protected string GetDefaultWorkspace() => _agentContext.GetWorkspaceDirPath();
 
     protected string Serialize(object obj) => JsonSerializer.Serialize(obj);
 

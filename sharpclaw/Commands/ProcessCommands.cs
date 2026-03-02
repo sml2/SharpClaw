@@ -15,10 +15,10 @@ public class ProcessCommands : CommandBase
     {
     }
 
-    [Description("Execute pwsh commands")]
+    [Description("Execute PowerShell (pwsh) commands. MUST use '-Command' or '-File' explicitly.")]
     public string CommandPowershell(
-    [Description("Arguments to pass to pwsh")] string[] args,
-    [Description("Working directory (optional)")] string workingDirectory = "")
+        [Description("Arguments to pass to pwsh. Example: [\"-Command\", \"Get-ChildItem -Path C:\\\"] or [\"-File\", \"./script.ps1\"]")] string[] args,
+        [Description("Working directory (optional, absolute path)")] string workingDirectory = "")
     {
         return RunProcess("pwsh", args ?? Array.Empty<string>(), "pwsh " + string.Join(" ", args ?? Array.Empty<string>()),
             true, workingDirectory, 0);

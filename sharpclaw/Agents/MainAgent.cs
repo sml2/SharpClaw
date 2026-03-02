@@ -74,7 +74,8 @@ public class MainAgent
             Directory.CreateDirectory(workspaceDir);
 
         _agentContext = agentContext;
-        _agentContext.SetWorkspacePath(workspaceDir);
+        _agentContext.SetWorkspaceDirPath(workspaceDir);
+        _agentContext.SetSessionDirPath(sessionDir);
 
         SystemPrompt.AppendLine();
         SystemPrompt.AppendLine($"[工作目录] {workspaceDir}");
@@ -138,11 +139,11 @@ public class MainAgent
         var systemPrompt = SystemPrompt.ToString();
 
         _reducer = new MemoryPipelineChatReducer(
+            agentContext,
             resetThreshold: 30,
             systemPrompt: systemPrompt,
             archiver: archiver,
             memorySaver: memorySaver);
-        _reducer.WorkingMemoryPath = _workingMemoryPath;
 
         _agent = new ChatClientBuilder(mainClient)
             .UseFunctionInvocation()
