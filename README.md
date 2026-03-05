@@ -32,8 +32,6 @@ By leveraging the `Microsoft.Extensions.AI` abstraction layer, Sharpclaw seamles
 ### 🔌 Extensible Skills System
 
 * **External Skills:** Load custom skills from `~/.sharpclaw/skills/` via `AgentSkillsDotNet`, seamlessly merged with built-in commands as a unified tool collection.
-* **Lua Scripting:** Embedded scripting support via `ToonSharp` for user-defined automation.
-* **Scheduled Tasks:** Cron expression support via `Cronos` for timed operations.
 
 ### 🔒 Secure Configuration
 
