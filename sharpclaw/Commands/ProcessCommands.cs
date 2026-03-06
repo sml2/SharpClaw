@@ -24,6 +24,16 @@ public class ProcessCommands : CommandBase
             true, workingDirectory, 0);
     }
 
+    [Description("Execute Windows PowerShell (powershell.exe / 5.1) commands. MUST use '-Command' or '-File' explicitly.")]
+    public string CommandWindowsPowershell(
+        [Description("Arguments to pass to powershell.exe. Example: [\"-Command\", \"Get-ChildItem -Path C:\\\\\"] or [\"-File\", \"./script.ps1\"]\"")] string[] args,
+        [Description("Working directory (optional, absolute path)")] string workingDirectory = "")
+    {
+        return RunProcess("powershell", args ?? Array.Empty<string>(),
+            "powershell " + string.Join(" ", args ?? Array.Empty<string>()),
+            true, workingDirectory, 0);
+    }
+
     [Description("Execute Bash commands")]
     public string CommandBash(
     [Description("Arguments to pass to Bash")] string[] args,

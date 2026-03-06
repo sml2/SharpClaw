@@ -65,7 +65,9 @@ public static class AgentBootstrap
 
         if (OperatingSystem.IsWindows())
         {
-            commandSkillDelegates.Add(processCommands.CommandPowershell);
+            commandSkillDelegates.Add(IsCommandAvailable("pwsh")
+                ? processCommands.CommandPowershell
+                : processCommands.CommandWindowsPowershell);
         }
         else
         {
@@ -87,5 +89,13 @@ public static class AgentBootstrap
         var memoryStore = ClientFactory.CreateMemoryStore(config);
 
         return new BootstrapResult(config, taskManager, [.. commandSkills, .. skillTools], memoryStore, agentContext);
+    }
+
+    private static bool IsCommandAvailable(string command)
+    {
+        var ext = OperatingSystem.IsWindows() ? ".exe" : "";
+        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+        return pathEnv.Split(Path.PathSeparator)
+            .Any(dir => File.Exists(Path.Combine(dir, command + ext)));
     }
 }
