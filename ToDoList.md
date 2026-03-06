@@ -9,7 +9,7 @@
     - [ ] 配置Options
  - [ ] 各Agent选择不同IChatClient实现,合理匹配不同Model的能力。
  - [ ] 增加Token计数功能,方便用户了解每次对话的Token使用情况。.
- - [ ] 
+ - [X] 增加PowerShell Core(pwsh.exe / 7.x)回退PowerShell(powershell.exe / 5.1)的功能
 
 ---
 ## TUI模式已知问题或改进方向
