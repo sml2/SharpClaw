@@ -1,43 +1,24 @@
-using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using Sharc;
 using Sharc.Vector;
-using System.Runtime.InteropServices;
-using System.Text.Json;
 
 using sharpclaw.Clients;
 
 namespace sharpclaw.Memory;
 
 /// <summary>
-/// 基于 Sharc + SQLite 的向量记忆存储：
-/// - Microsoft.Data.Sqlite 负责写操作（INSERT/UPDATE/DELETE）
+/// 基于 EF Core + SQLite 的向量记忆存储：
+/// - EF Core 负责写操作（INSERT/UPDATE/DELETE）
 /// - Sharc.Vector 负责向量相似度搜索（SIMD 加速）
 /// - 嵌入向量以 BLOB 形式存储在 SQLite 中
 /// </summary>
 public class VectorMemoryStore : IMemoryStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = false
-    };
-
-    private const string CreateTableSql = """
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            category TEXT NOT NULL,
-            importance INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            keywords TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            embedding BLOB NOT NULL
-        )
-        """;
-
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
     private readonly DashScopeRerankClient? _rerankClient;
     private readonly string _dbPath;
-    private readonly string _connectionString;
+    private readonly DbContextOptions<MemoryDbContext> _dbOptions;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private bool _dirty = true;
 
@@ -56,7 +37,7 @@ public class VectorMemoryStore : IMemoryStore
     {
         _embeddingGenerator = embeddingGenerator;
         _dbPath = filePath;
-        _connectionString = $"Data Source={filePath}";
+        _dbOptions = MemoryDbContext.BuildOptions(filePath);
         _rerankClient = rerankClient;
 
         InitializeDatabase();
@@ -89,16 +70,13 @@ public class VectorMemoryStore : IMemoryStore
                     .ToList();
                 existing.CreatedAt = DateTimeOffset.UtcNow;
 
-                // 更新数据库（用新向量如果内容被替换）
                 var finalVector = entry.Importance >= mostSimilar.Value.Entry.Importance
                     ? vector : null;
-                UpdateRow(existing, finalVector);
+                UpdateRecord(existing, finalVector);
                 return;
             }
 
-            InsertRow(entry, vector);
-
-            // 容量限制：淘汰重要度最低且最旧的记忆
+            InsertRecord(entry, vector);
             EvictIfNeeded();
         }
         finally
@@ -112,19 +90,20 @@ public class VectorMemoryStore : IMemoryStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            var existingContent = GetContentById(entry.Id);
-            if (existingContent is null)
+            using var context = new MemoryDbContext(_dbOptions);
+            var existing = context.Memories.Find(entry.Id);
+            if (existing is null)
                 return;
 
             float[]? newVector = null;
-            if (existingContent != entry.Content)
+            if (existing.Content != entry.Content)
             {
                 var embedding = await _embeddingGenerator.GenerateAsync(
                     entry.Content, cancellationToken: cancellationToken);
                 newVector = embedding.Vector.ToArray();
             }
 
-            UpdateRow(entry, newVector);
+            UpdateRecord(entry, newVector);
         }
         finally
         {
@@ -138,18 +117,12 @@ public class VectorMemoryStore : IMemoryStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            using var conn = new SqliteConnection(_connectionString);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id, category, importance, content, keywords, created_at FROM memories ORDER BY created_at DESC LIMIT $count";
-            cmd.Parameters.AddWithValue("$count", count);
-
-            var results = new List<MemoryEntry>();
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-                results.Add(ReadMemoryEntry(reader));
-
-            return results.AsReadOnly();
+            using var context = new MemoryDbContext(_dbOptions);
+            return await context.Memories
+                .OrderByDescending(m => m.CreatedAt)
+                .Take(count)
+                .Select(m => m.ToEntry())
+                .ToListAsync(cancellationToken);
         }
         finally
         {
@@ -163,7 +136,8 @@ public class VectorMemoryStore : IMemoryStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            var totalCount = GetCount();
+            using var context = new MemoryDbContext(_dbOptions);
+            var totalCount = await context.Memories.CountAsync(cancellationToken);
             if (totalCount == 0)
                 return [];
 
@@ -178,8 +152,7 @@ public class VectorMemoryStore : IMemoryStore
             if (candidates.Count == 0)
                 return [];
 
-            // 用 rowId 查回完整的 MemoryEntry
-            var entries = LoadEntriesByRowIds(candidates.Select(c => c.RowId).ToList());
+            var entries = LoadEntriesByRowIds(context, candidates.Select(c => c.RowId).ToList());
 
             // Phase 2: Rerank (optional)
             if (_rerankClient is not null && entries.Count > 0)
@@ -197,14 +170,11 @@ public class VectorMemoryStore : IMemoryStore
                 }
                 catch
                 {
-                    // Rerank failed, fall back to vector results
+                    // Rerank 失败，回退到向量搜索结果
                 }
             }
 
-            return entries
-                .Take(count)
-                .ToList()
-                .AsReadOnly();
+            return entries.Take(count).ToList().AsReadOnly();
         }
         finally
         {
@@ -217,12 +187,10 @@ public class VectorMemoryStore : IMemoryStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            using var conn = new SqliteConnection(_connectionString);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM memories WHERE id = $id";
-            cmd.Parameters.AddWithValue("$id", id);
-            cmd.ExecuteNonQuery();
+            using var context = new MemoryDbContext(_dbOptions);
+            await context.Memories
+                .Where(m => m.Id == id)
+                .ExecuteDeleteAsync(cancellationToken);
             _dirty = true;
         }
         finally
@@ -236,7 +204,8 @@ public class VectorMemoryStore : IMemoryStore
         await _lock.WaitAsync(cancellationToken);
         try
         {
-            return GetCount();
+            using var context = new MemoryDbContext(_dbOptions);
+            return await context.Memories.CountAsync(cancellationToken);
         }
         finally
         {
@@ -248,11 +217,8 @@ public class VectorMemoryStore : IMemoryStore
 
     private void InitializeDatabase()
     {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = CreateTableSql;
-        cmd.ExecuteNonQuery();
+        using var context = new MemoryDbContext(_dbOptions);
+        context.Database.EnsureCreated();
     }
 
     /// <summary>
@@ -267,39 +233,25 @@ public class VectorMemoryStore : IMemoryStore
         try
         {
             var json = File.ReadAllText(jsonPath);
-            var oldEntries = JsonSerializer.Deserialize<List<StoredMemoryEntryLegacy>>(json);
+            var oldEntries = System.Text.Json.JsonSerializer.Deserialize<List<StoredMemoryEntryLegacy>>(json);
             if (oldEntries is null or [])
             {
                 File.Move(jsonPath, jsonPath + ".bak", overwrite: true);
                 return;
             }
 
-            using var conn = new SqliteConnection(_connectionString);
-            conn.Open();
-            using var tx = conn.BeginTransaction();
-
+            using var context = new MemoryDbContext(_dbOptions);
             foreach (var old in oldEntries)
             {
                 if (old.Vector is null || old.Entry is null)
                     continue;
 
-                using var cmd = conn.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = """
-                    INSERT OR IGNORE INTO memories (id, category, importance, content, keywords, created_at, embedding)
-                    VALUES ($id, $category, $importance, $content, $keywords, $created_at, $embedding)
-                    """;
-                cmd.Parameters.AddWithValue("$id", old.Entry.Id);
-                cmd.Parameters.AddWithValue("$category", old.Entry.Category);
-                cmd.Parameters.AddWithValue("$importance", old.Entry.Importance);
-                cmd.Parameters.AddWithValue("$content", old.Entry.Content);
-                cmd.Parameters.AddWithValue("$keywords", JsonSerializer.Serialize(old.Entry.Keywords, JsonOptions));
-                cmd.Parameters.AddWithValue("$created_at", old.Entry.CreatedAt.ToString("O"));
-                cmd.Parameters.AddWithValue("$embedding", MemoryMarshal.AsBytes(old.Vector.AsSpan()).ToArray());
-                cmd.ExecuteNonQuery();
-            }
+                if (context.Memories.Find(old.Entry.Id) is not null)
+                    continue;
 
-            tx.Commit();
+                context.Memories.Add(MemoryRecord.FromEntry(old.Entry, old.Vector));
+            }
+            context.SaveChanges();
             _dirty = true;
 
             File.Move(jsonPath, jsonPath + ".bak", overwrite: true);
@@ -310,100 +262,52 @@ public class VectorMemoryStore : IMemoryStore
         }
     }
 
-    private void InsertRow(MemoryEntry entry, float[] vector)
+    private void InsertRecord(MemoryEntry entry, float[] vector)
     {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO memories (id, category, importance, content, keywords, created_at, embedding)
-            VALUES ($id, $category, $importance, $content, $keywords, $created_at, $embedding)
-            """;
-        cmd.Parameters.AddWithValue("$id", entry.Id);
-        cmd.Parameters.AddWithValue("$category", entry.Category);
-        cmd.Parameters.AddWithValue("$importance", entry.Importance);
-        cmd.Parameters.AddWithValue("$content", entry.Content);
-        cmd.Parameters.AddWithValue("$keywords", JsonSerializer.Serialize(entry.Keywords, JsonOptions));
-        cmd.Parameters.AddWithValue("$created_at", entry.CreatedAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$embedding", MemoryMarshal.AsBytes(vector.AsSpan()).ToArray());
-        cmd.ExecuteNonQuery();
+        using var context = new MemoryDbContext(_dbOptions);
+        context.Memories.Add(MemoryRecord.FromEntry(entry, vector));
+        context.SaveChanges();
         _dirty = true;
     }
 
-    private void UpdateRow(MemoryEntry entry, float[]? newVector)
+    private void UpdateRecord(MemoryEntry entry, float[]? newVector)
     {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
+        using var context = new MemoryDbContext(_dbOptions);
+        var record = context.Memories.Find(entry.Id);
+        if (record is null)
+            return;
 
+        record.Category = entry.Category;
+        record.Importance = entry.Importance;
+        record.Content = entry.Content;
+        record.Keywords = entry.Keywords;
+        record.CreatedAt = entry.CreatedAt;
         if (newVector is not null)
-        {
-            cmd.CommandText = """
-                UPDATE memories SET category = $category, importance = $importance, content = $content,
-                    keywords = $keywords, created_at = $created_at, embedding = $embedding
-                WHERE id = $id
-                """;
-            cmd.Parameters.AddWithValue("$embedding", MemoryMarshal.AsBytes(newVector.AsSpan()).ToArray());
-        }
-        else
-        {
-            cmd.CommandText = """
-                UPDATE memories SET category = $category, importance = $importance, content = $content,
-                    keywords = $keywords, created_at = $created_at
-                WHERE id = $id
-                """;
-        }
+            record.Embedding = MemoryRecord.FloatArrayToBytes(newVector);
 
-        cmd.Parameters.AddWithValue("$id", entry.Id);
-        cmd.Parameters.AddWithValue("$category", entry.Category);
-        cmd.Parameters.AddWithValue("$importance", entry.Importance);
-        cmd.Parameters.AddWithValue("$content", entry.Content);
-        cmd.Parameters.AddWithValue("$keywords", JsonSerializer.Serialize(entry.Keywords, JsonOptions));
-        cmd.Parameters.AddWithValue("$created_at", entry.CreatedAt.ToString("O"));
-        cmd.ExecuteNonQuery();
+        context.SaveChanges();
         _dirty = true;
     }
 
     private void EvictIfNeeded()
     {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-
-        using var countCmd = conn.CreateCommand();
-        countCmd.CommandText = "SELECT COUNT(*) FROM memories";
-        var count = Convert.ToInt32(countCmd.ExecuteScalar());
-
+        using var context = new MemoryDbContext(_dbOptions);
+        var count = context.Memories.Count();
         if (count <= MaxEntries)
             return;
 
-        using var deleteCmd = conn.CreateCommand();
-        deleteCmd.CommandText = """
-            DELETE FROM memories WHERE id IN (
-                SELECT id FROM memories ORDER BY importance ASC, created_at ASC LIMIT $excess
-            )
-            """;
-        deleteCmd.Parameters.AddWithValue("$excess", count - MaxEntries);
-        deleteCmd.ExecuteNonQuery();
+        var excess = count - MaxEntries;
+        var toEvict = context.Memories
+            .OrderBy(m => m.Importance)
+            .ThenBy(m => m.CreatedAt)
+            .Take(excess)
+            .Select(m => m.Id)
+            .ToList();
+
+        context.Memories
+            .Where(m => toEvict.Contains(m.Id))
+            .ExecuteDelete();
         _dirty = true;
-    }
-
-    private int GetCount()
-    {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM memories";
-        return Convert.ToInt32(cmd.ExecuteScalar());
-    }
-
-    private string? GetContentById(string id)
-    {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT content FROM memories WHERE id = $id";
-        cmd.Parameters.AddWithValue("$id", id);
-        return cmd.ExecuteScalar() as string;
     }
 
     /// <summary>
@@ -411,10 +315,11 @@ public class VectorMemoryStore : IMemoryStore
     /// </summary>
     private IReadOnlyList<VectorMatch> VectorSearch(float[] queryVector, int k)
     {
-        // 确保 Sqlite WAL checkpoint 完成，Sharc 能读到最新数据
+        // 确保 WAL checkpoint 完成，Sharc 能读到最新数据
         if (_dirty)
         {
-            SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
+            using var context = new MemoryDbContext(_dbOptions);
+            context.Database.ExecuteSqlRaw("PRAGMA wal_checkpoint(TRUNCATE)");
             _dirty = false;
         }
 
@@ -449,76 +354,47 @@ public class VectorMemoryStore : IMemoryStore
         if (match.Distance > DeduplicationDistance)
             return null;
 
-        var entry = LoadEntryByRowId(match.RowId);
+        using var context = new MemoryDbContext(_dbOptions);
+        var entry = LoadEntryByRowId(context, match.RowId);
         if (entry is null)
             return null;
 
         return (entry, match.Distance);
     }
 
-    private MemoryEntry? LoadEntryByRowId(long rowId)
+    private static MemoryEntry? LoadEntryByRowId(MemoryDbContext context, long rowId)
     {
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, category, importance, content, keywords, created_at FROM memories WHERE rowid = $rowid";
-        cmd.Parameters.AddWithValue("$rowid", rowId);
-
-        using var reader = cmd.ExecuteReader();
-        return reader.Read() ? ReadMemoryEntry(reader) : null;
+        return context.Memories
+            .FromSqlRaw("SELECT id, category, importance, content, keywords, created_at, embedding FROM memories WHERE rowid = {0}", rowId)
+            .AsNoTracking()
+            .Select(r => r.ToEntry())
+            .FirstOrDefault();
     }
 
-    private List<MemoryEntry> LoadEntriesByRowIds(List<long> rowIds)
+    private static List<MemoryEntry> LoadEntriesByRowIds(MemoryDbContext context, List<long> rowIds)
     {
         if (rowIds.Count == 0)
             return [];
 
-        using var conn = new SqliteConnection(_connectionString);
-        conn.Open();
-
-        // 保持 rowIds 的顺序（即向量搜索的相关度顺序）
-        var placeholders = string.Join(",", rowIds.Select((_, i) => $"$r{i}"));
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"SELECT id, category, importance, content, keywords, created_at, rowid FROM memories WHERE rowid IN ({placeholders})";
-        for (var i = 0; i < rowIds.Count; i++)
-            cmd.Parameters.AddWithValue($"$r{i}", rowIds[i]);
-
+        // 逐行查询后按原始顺序重建，保持向量搜索的相关度顺序
         var map = new Dictionary<long, MemoryEntry>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
+        foreach (var rowId in rowIds)
         {
-            var entry = ReadMemoryEntry(reader);
-            var rid = reader.GetInt64(6);
-            map[rid] = entry;
+            var entry = LoadEntryByRowId(context, rowId);
+            if (entry is not null)
+                map[rowId] = entry;
         }
 
-        // 按原始 rowIds 顺序返回
-        var results = new List<MemoryEntry>();
-        foreach (var rid in rowIds)
-        {
-            if (map.TryGetValue(rid, out var entry))
-                results.Add(entry);
-        }
-        return results;
-    }
-
-    private static MemoryEntry ReadMemoryEntry(SqliteDataReader reader)
-    {
-        return new MemoryEntry
-        {
-            Id = reader.GetString(0),
-            Category = reader.GetString(1),
-            Importance = reader.GetInt32(2),
-            Content = reader.GetString(3),
-            Keywords = JsonSerializer.Deserialize<List<string>>(reader.GetString(4)) ?? [],
-            CreatedAt = DateTimeOffset.Parse(reader.GetString(5))
-        };
+        return rowIds
+            .Where(map.ContainsKey)
+            .Select(rid => map[rid])
+            .ToList();
     }
 
     /// <summary>
     /// 旧版 JSON 格式的记忆条目，仅用于迁移。
     /// </summary>
-    private class StoredMemoryEntryLegacy
+    private sealed class StoredMemoryEntryLegacy
     {
         public MemoryEntry? Entry { get; set; }
         public float[]? Vector { get; set; }
