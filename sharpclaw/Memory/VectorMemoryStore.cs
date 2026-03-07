@@ -342,7 +342,7 @@ public class VectorMemoryStore : IMemoryStore
         {
             var dbBytes = File.ReadAllBytes(_dbPath);
             using var db = SharcDatabase.OpenMemory(dbBytes);
-            using var vq = db.Vector("memories", "embedding", DistanceMetric.Cosine);
+            using var vq = db.Vector("memories", VectorEntry.EmbeddingDbFiledName, DistanceMetric.Cosine);
             var result = vq.NearestTo(queryVector, k: k);
             return result.Matches;
         }
@@ -374,7 +374,7 @@ public class VectorMemoryStore : IMemoryStore
         return (entry, match.Distance);
     }
 
-    private static MemoryEntry? LoadEntryByRowId(MemoryDbContext context, long rowId)
+    private static VectorEntry? LoadEntryByRowId(MemoryDbContext context, long rowId)
     {
         return context.Memories
             .FromSqlRaw("SELECT id, category, importance, content, keywords, created_at, embedding FROM memories WHERE rowid = {0}", rowId)
