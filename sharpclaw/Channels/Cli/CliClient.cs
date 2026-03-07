@@ -258,18 +258,8 @@ public sealed class CliClient : IDisposable
 
     private void BeginAiResponse()
     {
-        lock (_consoleLock)
-        {
-            if (!_inTextMode)
-            {
-                _inTextMode = true;
-                SetColor(ConsoleColor.Green);
-                Console.Write("\r🤖 AI: ");
-                EraseToEnd();
-                ResetColor();
-                _hasOutputPrefix = true;
-            }
-        }
+        // 留空：让 AppendChat 在真正收到第一块文本(TTFB)时再切换 UI 到文本模式
+        // 这样可以确保大模型响应前，一直保持“思考中...”的动画
     }
 
     private void ShowRunning()
