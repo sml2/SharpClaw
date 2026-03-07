@@ -12,7 +12,7 @@ internal sealed class MemoryDbContext : DbContext
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
-    public DbSet<MemoryEntry> Memories => Set<MemoryEntry>();
+    public DbSet<VectorEntry> Memories => Set<VectorEntry>();
 
     public MemoryDbContext(DbContextOptions<MemoryDbContext> options) : base(options) { }
 
@@ -27,7 +27,7 @@ internal sealed class MemoryDbContext : DbContext
             v => v.ToString("O"),
             v => DateTimeOffset.Parse(v));
 
-        modelBuilder.Entity<MemoryEntry>(e =>
+        modelBuilder.Entity<VectorEntry>(e =>
         {
             e.ToTable("memories");
             e.HasKey(m => m.Id);
@@ -43,7 +43,7 @@ internal sealed class MemoryDbContext : DbContext
                 .HasColumnName("created_at")
                 .HasConversion(dateTimeConverter);
             e.Property(m => m.Embedding)
-                .HasColumnName("embedding")
+                .HasColumnName(VectorEntry.EmbeddingDbFiledName)
                 .IsRequired();
         });
     }

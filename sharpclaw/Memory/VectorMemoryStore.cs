@@ -249,7 +249,7 @@ public class VectorMemoryStore : IMemoryStore
                     continue;
                 // 将旧的 StoredMemoryEntryLegacy 中的 Entry 和 Vector 合并为 MemoryEntry
                 var rec = old.Entry;
-                rec.Embedding = MemoryEntry.FloatArrayToBytes(old.Vector);
+                rec.Vector = old.Vector;
                 context.Memories.Add(rec);
             }
             context.SaveChanges();
@@ -265,9 +265,19 @@ public class VectorMemoryStore : IMemoryStore
 
     private void InsertRecord(MemoryEntry entry, float[] vector)
     {
+      var ve =  new VectorEntry
+        {
+            Id = entry.Id,
+            Category = entry.Category,
+            Importance = entry.Importance,
+            Content = entry.Content,
+            Keywords = entry.Keywords,
+            CreatedAt = entry.CreatedAt,
+            Vector = vector
+        };
         using var context = new MemoryDbContext(_dbOptions);
-        entry.Embedding = MemoryEntry.FloatArrayToBytes(vector);
-        context.Memories.Add(entry);
+        ve.Vector = vector;
+        context.Memories.Add(ve);
         context.SaveChanges();
         _dirty = true;
     }
@@ -285,7 +295,7 @@ public class VectorMemoryStore : IMemoryStore
         record.Keywords = entry.Keywords;
         record.CreatedAt = entry.CreatedAt;
         if (newVector is not null)
-            record.Embedding = MemoryEntry.FloatArrayToBytes(newVector);
+            record.Vector = newVector;
 
         context.SaveChanges();
         _dirty = true;
@@ -398,7 +408,7 @@ public class VectorMemoryStore : IMemoryStore
     /// </summary>
     private sealed class StoredMemoryEntryLegacy
     {
-        public MemoryEntry? Entry { get; set; }
+        public VectorEntry? Entry { get; set; }
         public float[]? Vector { get; set; }
     }
 }

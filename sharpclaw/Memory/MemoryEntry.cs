@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace sharpclaw.Memory;
 
 /// <summary>
@@ -23,26 +25,32 @@ public class MemoryEntry
     /// <summary>创建时间</summary>
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
+
+}
+public class VectorEntry : MemoryEntry
+{
+    public const string EmbeddingDbFiledName = "embedding";
     /// <summary>嵌入向量，以 BLOB 形式存储（float[] 按字节序列化）</summary>
     public byte[] Embedding { get; set; } = [];
 
-    /// <summary>从 float[] 转换为字节数组</summary>
-    public static byte[] FloatArrayToBytes(float[] vector)
+    public float[] Vector
     {
-        var bytes = new byte[vector.Length * sizeof(float)];
-        Buffer.BlockCopy(vector, 0, bytes, 0, bytes.Length);
-        return bytes;
-    }
-
-    /// <summary>从字节数组转换为 float[]</summary>
-    public static float[] BytesToFloatArray(byte[] bytes)
-    {
-        var result = new float[bytes.Length / sizeof(float)];
-        Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
-        return result;
+        /// <summary>从 float[] 转换为字节数组</summary>
+        get
+        {
+            var result = new float[Embedding.Length / sizeof(float)];
+            Buffer.BlockCopy(Embedding, 0, result, 0, Embedding.Length);
+            return result;
+        }
+        /// <summary>从字节数组转换为 float[]</summary>
+        set
+        {
+            var bytes = new byte[value.Length * sizeof(float)];
+            Buffer.BlockCopy(value, 0, bytes, 0, bytes.Length);
+            Embedding = bytes;
+        }
     }
 }
-
 /// <summary>
 /// 记忆库统计信息。
 /// </summary>
