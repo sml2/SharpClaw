@@ -195,7 +195,7 @@ public sealed class CliClient : IDisposable
                     break;
 
                 case "aiEnd":
-                    // AI 回复结束，不需要额外处理
+                    ShowStop();
                     break;
 
                 case "running":
@@ -316,13 +316,17 @@ public sealed class CliClient : IDisposable
     {
         lock (_consoleLock)
         {
+            if (status == _status) return;
             _status = status;
+
             if (_inTextMode)
             {
                 Console.WriteLine();
                 _inTextMode = false;
-                RenderSpinnerLine("⠋");
             }
+            
+            // 立即渲染新状态，不要干等 80ms 的刷帧，以避免短状态被吞
+            RenderSpinnerLine("⠋");
         }
     }
 
@@ -371,6 +375,19 @@ public sealed class CliClient : IDisposable
         EraseToEnd();
         Console.Out.Flush();
         ResetColor();
+    }
+
+    private void ShowStop()
+    {
+        StopAnimation();
+        lock (_consoleLock)
+        {
+            if (!_inTextMode)
+            {
+                Console.Write('\r');
+                EraseToEnd();
+            }
+        }
     }
 
     private static bool IsWideChar(char c) =>
