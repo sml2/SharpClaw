@@ -121,7 +121,6 @@ public class VectorMemoryStore : IMemoryStore
             return await context.Memories
                 .OrderByDescending(m => m.CreatedAt)
                 .Take(count)
-                .Select(m => m.ToEntry())
                 .ToListAsync(cancellationToken);
         }
         finally
@@ -248,8 +247,10 @@ public class VectorMemoryStore : IMemoryStore
 
                 if (context.Memories.Find(old.Entry.Id) is not null)
                     continue;
-
-                context.Memories.Add(MemoryRecord.FromEntry(old.Entry, old.Vector));
+                // 将旧的 StoredMemoryEntryLegacy 中的 Entry 和 Vector 合并为 MemoryEntry
+                var rec = old.Entry;
+                rec.Embedding = MemoryEntry.FloatArrayToBytes(old.Vector);
+                context.Memories.Add(rec);
             }
             context.SaveChanges();
             _dirty = true;
@@ -265,7 +266,8 @@ public class VectorMemoryStore : IMemoryStore
     private void InsertRecord(MemoryEntry entry, float[] vector)
     {
         using var context = new MemoryDbContext(_dbOptions);
-        context.Memories.Add(MemoryRecord.FromEntry(entry, vector));
+        entry.Embedding = MemoryEntry.FloatArrayToBytes(vector);
+        context.Memories.Add(entry);
         context.SaveChanges();
         _dirty = true;
     }
@@ -283,7 +285,7 @@ public class VectorMemoryStore : IMemoryStore
         record.Keywords = entry.Keywords;
         record.CreatedAt = entry.CreatedAt;
         if (newVector is not null)
-            record.Embedding = MemoryRecord.FloatArrayToBytes(newVector);
+            record.Embedding = MemoryEntry.FloatArrayToBytes(newVector);
 
         context.SaveChanges();
         _dirty = true;
@@ -367,7 +369,7 @@ public class VectorMemoryStore : IMemoryStore
         return context.Memories
             .FromSqlRaw("SELECT id, category, importance, content, keywords, created_at, embedding FROM memories WHERE rowid = {0}", rowId)
             .AsNoTracking()
-            .Select(r => r.ToEntry())
+            .Select(r => r)
             .FirstOrDefault();
     }
 

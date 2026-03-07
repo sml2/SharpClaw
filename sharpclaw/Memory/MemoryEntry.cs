@@ -22,6 +22,25 @@ public class MemoryEntry
 
     /// <summary>创建时间</summary>
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>嵌入向量，以 BLOB 形式存储（float[] 按字节序列化）</summary>
+    public byte[] Embedding { get; set; } = [];
+
+    /// <summary>从 float[] 转换为字节数组</summary>
+    public static byte[] FloatArrayToBytes(float[] vector)
+    {
+        var bytes = new byte[vector.Length * sizeof(float)];
+        Buffer.BlockCopy(vector, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    /// <summary>从字节数组转换为 float[]</summary>
+    public static float[] BytesToFloatArray(byte[] bytes)
+    {
+        var result = new float[bytes.Length / sizeof(float)];
+        Buffer.BlockCopy(bytes, 0, result, 0, bytes.Length);
+        return result;
+    }
 }
 
 /// <summary>

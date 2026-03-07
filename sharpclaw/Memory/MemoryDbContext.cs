@@ -12,7 +12,7 @@ internal sealed class MemoryDbContext : DbContext
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
-    public DbSet<MemoryRecord> Memories => Set<MemoryRecord>();
+    public DbSet<MemoryEntry> Memories => Set<MemoryEntry>();
 
     public MemoryDbContext(DbContextOptions<MemoryDbContext> options) : base(options) { }
 
@@ -27,7 +27,7 @@ internal sealed class MemoryDbContext : DbContext
             v => v.ToString("O"),
             v => DateTimeOffset.Parse(v));
 
-        modelBuilder.Entity<MemoryRecord>(e =>
+        modelBuilder.Entity<MemoryEntry>(e =>
         {
             e.ToTable("memories");
             e.HasKey(m => m.Id);
